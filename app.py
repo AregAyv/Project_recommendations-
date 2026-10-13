@@ -1,4 +1,7 @@
+
 import os
+import logging
+from contextlib import asynccontextmanager
 from enum import Enum
 
 import joblib
@@ -10,28 +13,68 @@ from steam_client import get_owned_games, SteamProfileError
 
 ARTIFACTS_PATH = os.environ.get('ARTIFACTS_PATH', 'model_artifacts/model_artifacts.joblib')
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('game_recommender')
+
+artifacts = None
+game_mapper = None
+game_inv_mapper = None
+content_idx_map = None
+content_inv_map = None
+knn_collab_model = None
+knn_content_model = None
+als_model = None
+popularity_ranking = None
+games_lookup = None
+available_models = None
+lightfm_item_embeddings = None
+lightfm_item_id_map = None
+lightfm_inv_item_map = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global artifacts
+    global game_mapper, game_inv_mapper
+    global content_idx_map, content_inv_map
+    global knn_collab_model, knn_content_model, als_model
+    global popularity_ranking, games_lookup, available_models
+    global lightfm_item_embeddings, lightfm_item_id_map, lightfm_inv_item_map
+
+    logger.info('Loading model artifacts from %s', ARTIFACTS_PATH)
+
+    try:
+        artifacts = joblib.load(ARTIFACTS_PATH)
+
+        game_mapper = artifacts['game_mapper']
+        game_inv_mapper = artifacts['game_inv_mapper']
+        content_idx_map = artifacts['content_idx_map']
+        content_inv_map = artifacts['content_inv_map']
+        knn_collab_model = artifacts['knn_collab_model']
+        knn_content_model = artifacts['knn_content_model']
+        als_model = artifacts['als_model']
+        popularity_ranking = artifacts['popularity_ranking']
+        games_lookup = artifacts['games_lookup']
+        available_models = artifacts['available_models']
+
+        lightfm_item_embeddings = artifacts.get('lightfm_item_embeddings')
+        lightfm_item_id_map = artifacts.get('lightfm_item_id_map')
+        lightfm_inv_item_map = artifacts.get('lightfm_inv_item_map')
+
+        logger.info('Model artifacts loaded successfully')
+    except Exception:
+        logger.exception('Failed to load model artifacts')
+        raise
+
+    yield
+
+
 app = FastAPI(
     title='Game Recommender API',
     description='Recommend similar Steam games using one of several models, or a weighted hybrid blend.',
     version='1.0.0',
+    lifespan=lifespan,
 )
-#load artifacts
-artifacts = joblib.load(ARTIFACTS_PATH)
-
-game_mapper = artifacts['game_mapper']
-game_inv_mapper = artifacts['game_inv_mapper']
-content_idx_map = artifacts['content_idx_map']
-content_inv_map = artifacts['content_inv_map']
-knn_collab_model = artifacts['knn_collab_model']
-knn_content_model = artifacts['knn_content_model']
-als_model = artifacts['als_model']
-popularity_ranking = artifacts['popularity_ranking']
-games_lookup = artifacts['games_lookup']
-available_models = artifacts['available_models']
-
-lightfm_item_embeddings = artifacts.get('lightfm_item_embeddings')
-lightfm_item_id_map = artifacts.get('lightfm_item_id_map')
-lightfm_inv_item_map = artifacts.get('lightfm_inv_item_map')
 
 
 class ModelName(str, Enum):
@@ -68,7 +111,6 @@ class ProfileRecommendResponse(BaseModel):
     recommendations: list[Recommendation]
 
 
-#functions for each model
 def recommend_collaborative_knn(app_id, k):
     game_idx = game_mapper[app_id]
     distances, indices = knn_collab_model.kneighbors(
@@ -102,13 +144,19 @@ def recommend_popularity(app_id, k):
 
 def recommend_lightfm(app_id, k):
     if lightfm_item_embeddings is None:
-        raise HTTPException(status_code=404, detail='LightFM model is not available on this deployment.')
+        raise HTTPException(
+            status_code=404,
+            detail='LightFM model is not available on this deployment.'
+        )
     item_idx = lightfm_item_id_map[app_id]
     seed_vec = lightfm_item_embeddings[item_idx]
     scores = lightfm_item_embeddings @ seed_vec
     top_indices = np.argsort(-scores)
-    return [lightfm_inv_item_map[i] for i in top_indices if lightfm_inv_item_map[i] != app_id][:k]
-
+    return [
+        lightfm_inv_item_map[i]
+        for i in top_indices
+        if lightfm_inv_item_map[i] != app_id
+    ][:k]
 
 
 DEFAULT_HYBRID_WEIGHTS = {
@@ -142,7 +190,6 @@ def recommend_hybrid(app_id, k, weights=None, pool_multiplier=3):
     return [aid for aid, _ in ranked[:k]]
 
 
-
 MODEL_DISPATCH = {
     'collaborative_knn': recommend_collaborative_knn,
     'collaborative_cosine': recommend_collaborative_cosine,
@@ -156,6 +203,8 @@ MODEL_DISPATCH = {
 
 @app.get('/health')
 def health():
+    if available_models is None:
+        raise HTTPException(status_code=503, detail='Model artifacts are not loaded.')
     return {'status': 'ok', 'available_models': available_models}
 
 
@@ -171,7 +220,10 @@ def recommend(
     k: int = Query(10, ge=1, le=50, description='Number of recommendations to return'),
 ):
     if model.value not in available_models:
-        raise HTTPException(status_code=400, detail=f'Model "{model.value}" is not available on this deployment.')
+        raise HTTPException(
+            status_code=400,
+            detail=f'Model "{model.value}" is not available on this deployment.'
+        )
 
     if app_id not in games_lookup:
         raise HTTPException(status_code=404, detail=f'app_id {app_id} not found.')
@@ -200,7 +252,8 @@ def recommend(
 @app.get('/recommend_from_profile', response_model=ProfileRecommendResponse)
 def recommend_from_profile(
     steam_profile: str = Query(
-        ..., description='SteamID64, full profile URL, or vanity name (e.g. steamcommunity.com/id/yourname)'
+        ...,
+        description='SteamID64, full profile URL, or vanity name (e.g. steamcommunity.com/id/yourname)'
     ),
     model: ModelName = Query(..., description='Which model to use for recommendations'),
     k: int = Query(10, ge=1, le=50, description='Number of recommendations to return'),
@@ -219,13 +272,15 @@ def recommend_from_profile(
 
     recommend_fn = MODEL_DISPATCH[model.value]
 
-    # try candidates in order of playtime, skipping any the chosen model
-    # doesn't actually have training data for, instead of failing outright
-    # on just the single most-played game
-    candidates_by_playtime = sorted(known_owned, key=lambda g: g['playtime_minutes'], reverse=True)
+    candidates_by_playtime = sorted(
+        known_owned,
+        key=lambda g: g['playtime_minutes'],
+        reverse=True
+    )
 
     seed_game = None
     recommended_ids = None
+
     for candidate in candidates_by_playtime:
         try:
             recommended_ids = recommend_fn(candidate['app_id'], k)
@@ -244,7 +299,6 @@ def recommend_from_profile(
         )
 
     seed_app_id = seed_game['app_id']
-        
 
     owned_ids = {g['app_id'] for g in owned_games}
     recommended_ids = [aid for aid in recommended_ids if aid not in owned_ids]
@@ -254,7 +308,10 @@ def recommend_from_profile(
         games_owned_matched=len(known_owned),
         seed_app_id=seed_app_id,
         seed_title=games_lookup.get(seed_app_id, 'Unknown'),
-        seed_reason=f'Most-played game in this profile with data available for this model ({seed_game["playtime_minutes"]} minutes)',
+        seed_reason=(
+            f'Most-played game in this profile with data available for this model '
+            f'({seed_game["playtime_minutes"]} minutes)'
+        ),
         model_used=model.value,
         recommendations=[
             Recommendation(app_id=aid, title=games_lookup.get(aid, 'Unknown'))
