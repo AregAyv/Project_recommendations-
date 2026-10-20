@@ -485,19 +485,14 @@ def main():
         models['lightfm'] = lightfm_recommend
 
 
-        lightfm_recommend, lightfm_model = make_lightfm(train_df, content_idx_map, game_features)
-    if lightfm_recommend is not None:
-        models['lightfm'] = lightfm_recommend
-
     # hybrid model
     hybrid_selection = {
         'collaborative_knn': 1.0,
-        'collaborative_cosine': 1.0,
         'content_based': 1.0,
         'als': 1.5,
         'popularity': 0.5,
-        'lightfm': 1.0,
     }
+
     hybrid_models = {name: models[name] for name in hybrid_selection if name in models}
     hybrid_weights = {name: w for name, w in hybrid_selection.items() if name in models}
 
@@ -518,11 +513,18 @@ def main():
             n_users=n_users
         )
 
+    
     print('\n=== Results ===')
     results_df = pd.DataFrame(results).T.sort_values('precision@k', ascending=False)
     print(results_df)
 
-    return 
+    os.makedirs('results', exist_ok=True)
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results_path = f'results/model_comparison_{timestamp}.csv'
+    results_df.to_csv(results_path)
+    print(f'Results saved to {results_path}')
+
+    return results_df
 
 
 if __name__ == '__main__':
