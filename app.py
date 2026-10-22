@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from steam_client import get_owned_games, SteamProfileError
 
+#path to the artifacts we saves in freeze_models
 ARTIFACTS_PATH = os.environ.get('ARTIFACTS_PATH', 'model_artifacts/model_artifacts.joblib')
 
 logging.basicConfig(level=logging.INFO)
@@ -42,7 +43,7 @@ async def lifespan(app: FastAPI):
     global lightfm_item_embeddings, lightfm_item_id_map, lightfm_inv_item_map
 
     logger.info('Loading model artifacts from %s', ARTIFACTS_PATH)
-
+    #get artifacts for each model
     try:
         artifacts = joblib.load(ARTIFACTS_PATH)
 

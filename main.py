@@ -30,9 +30,11 @@ except ImportError:
 
 # 1. Data loading
 def load_data():
+    #Kagglehub 
     path = kagglehub.dataset_download('antonkozyriev/game-recommendations-on-steam')
     print('Path to dataset files:', path)
 
+    #dataset consists of 4 files
     games_raw = pd.read_csv(os.path.join(path, 'games.csv'))
     users_raw = pd.read_csv(os.path.join(path, 'users.csv'))
     recommendations_raw = pd.read_csv(os.path.join(path, 'recommendations.csv'))
@@ -48,13 +50,15 @@ def load_data():
 
 
 # 2. Data cleaning(EDA)
+
+#Convets dates to datetime type
 def parse_date(date_str):
     try:
         return datetime.strptime(date_str, '%Y-%m-%d')
     except (ValueError, TypeError):
         return None
 
-
+#Drop useless columns
 def clean_games(games_df):
     games_clean = games_df.copy()
 
@@ -82,10 +86,11 @@ def clean_games(games_df):
     }
     games_clean['rating'] = games_clean['rating'].map(rating_map)
 
+    #Drop games with less than 10 reviews
     before = games_clean.shape[0]
     games_clean = games_clean[games_clean['user_reviews'] >= 10]
     after = games_clean.shape[0]
-    print(f"Dropped {before - after} games with <10 reviews ({before} -> {after})")
+    print(f'Dropped {before - after} games with <10 reviews ({before} -> {after})')
 
     return games_clean
 
@@ -121,17 +126,17 @@ def build_interaction_matrix(interactions_df, train_df):
         shape=(len(game_mapper), len(user_mapper))
     )
 
+    #Calculate sparsity (how full is matrix)
     sparsity = X.count_nonzero() / (X.shape[0] * X.shape[1])
     print(f'Matrix sparsity: {round(sparsity * 100, 2)}%')
 
+    #Save matrix
     os.makedirs('data', exist_ok=True)
     save_npz('data/user_item_matrix.npz', X)
 
     return X, user_mapper, game_mapper, user_inv_mapper, game_inv_mapper, app_ids
 
-
-#Content-based df
-
+# Creater content based features for future models
 def build_content_features(games_clean, games_metadata_df):
     content_df = games_clean.merge(
         games_metadata_df[['app_id', 'tags']], on='app_id', how='left'
@@ -175,13 +180,17 @@ def build_content_features(games_clean, games_metadata_df):
     return content_df, game_features, content_idx_map, content_inv_map
 
 
+#Helper function to find game by it's title
 def game_finder(title, games_lookup):
     all_titles = games_lookup['title'].tolist()
     closest_match = process.extractOne(title, all_titles)
     return closest_match[0]
 
 
+#------------------------------------------------
+#Model N1
 # KNN Neighbors
+#------------------------------------------------
 def make_collaborative_knn(X, game_mapper, game_inv_mapper):
     knn_model = NearestNeighbors(metric='cosine', algorithm='brute')
     knn_model.fit(X)
@@ -194,6 +203,10 @@ def make_collaborative_knn(X, game_mapper, game_inv_mapper):
     return _recommend
 
 
+#------------------------------------------------
+#Model N2
+# Collaborative cosin
+#------------------------------------------------
 def make_collaborative_cosine(cosine_sim, game_mapper, game_inv_mapper):
     def _recommend(app_id, k=10):
         game_ind = game_mapper[app_id]
@@ -203,7 +216,10 @@ def make_collaborative_cosine(cosine_sim, game_mapper, game_inv_mapper):
     return _recommend
 
 
-#Knn but with content based data
+#------------------------------------------------
+#Model N3
+# Content based
+#------------------------------------------------
 def make_content_based(game_features, content_idx_map, content_inv_map):
     
     feature_matrix = csr_matrix(game_features.astype(np.float32).values)
@@ -221,7 +237,10 @@ def make_content_based(game_features, content_idx_map, content_inv_map):
 
 
 
+#------------------------------------------------
+#Model N4
 #als model (AlternatingLeastSquares)
+#------------------------------------------------
 def make_als(X, game_mapper, game_inv_mapper, factors=20, regularization=0.01, alpha=15, iterations=20):
    
     als_model = AlternatingLeastSquares(
@@ -242,7 +261,10 @@ def make_als(X, game_mapper, game_inv_mapper, factors=20, regularization=0.01, a
 
 
 
+#------------------------------------------------
+#Model N5
 #lightfm model
+#------------------------------------------------
 def make_lightfm(train_df, content_idx_map, game_features, no_components=50, learning_rate=0.05, loss='warp', epochs=20):
   
     if not LIGHTFM_AVAILABLE:
@@ -286,6 +308,10 @@ def make_lightfm(train_df, content_idx_map, game_features, no_components=50, lea
     return _recommend, lightfm_model
 
 
+#------------------------------------------------
+#Model N6
+#Popularity based model
+#------------------------------------------------
 def make_popularity(train_df):
     popularity_ranking = (
         train_df[train_df['is_recommended'] == True]
@@ -301,7 +327,9 @@ def make_popularity(train_df):
         return recs[:k]
     return _recommend
 
+
 #  Evaluation metrics
+
 def reciprocal_rank(recommended_list, true_games):
     for i, item in enumerate(recommended_list):
         if item in true_games:
@@ -422,7 +450,11 @@ def evaluate_model(recommend_fn, train_df, test_df, k=10, n_users_sample=500,
     }
 
       
-
+#------------------------------------------------
+#Model N6
+#Hybrid model
+#------------------------------------------------
+#created hybrid model from previous models with given weights
 def make_hybrid(model_recommend_fns, weights=None, pool_multiplier=3):
     if weights is None:
         weights = {name: 1.0 for name in model_recommend_fns}
@@ -485,7 +517,7 @@ def main():
         models['lightfm'] = lightfm_recommend
 
 
-    # hybrid model
+    # hybrid model weights
     hybrid_selection = {
         'collaborative_knn': 1.0,
         'content_based': 1.0,
@@ -498,7 +530,7 @@ def main():
 
     models['hybrid'] = make_hybrid(hybrid_models, weights=hybrid_weights)
 
-    # ---- evaluate all models with the same harness ----
+    # evaluate all models with the same harness
     feature_lookup, item_popularity, n_users = build_evaluation_helpers(
     train_df, game_features, content_idx_map
 )

@@ -66,6 +66,7 @@ def freeze_all_models(output_dir='model_artifacts'):
         .tolist()
     )
 
+    #Saving results in artifacts
     artifacts = {
         'game_mapper': game_mapper,
         'game_inv_mapper': game_inv_mapper,
@@ -109,7 +110,7 @@ def freeze_all_models(output_dir='model_artifacts'):
 
         _, item_embeddings = lightfm_model.get_item_representations(features=item_features_matrix)
 
-
+        #adding lightdm and hybrid models to artifacts
         artifacts['lightfm_item_embeddings'] = item_embeddings
         artifacts['lightfm_item_id_map'] = item_id_map
         artifacts['lightfm_inv_item_map'] = inv_item_map
